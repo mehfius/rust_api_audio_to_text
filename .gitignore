@@ -1,0 +1,8 @@
+/target/
+!/target/
+/target/*
+!/target/release/
+/target/release/*
+!/target/release/rust_api_audio_to_text
+*.lock
+/models/
