@@ -1,10 +1,10 @@
 use actix_multipart::Multipart;
-use actix_web::{post, App, HttpResponse, HttpServer, Responder, Error};
+use actix_web::{post, App, HttpResponse, HttpServer, Responder, Error}; // 'web' removido
 use futures_util::TryStreamExt as _;
 use tokio::process::Command;
 use tokio::io::AsyncWriteExt;
 use serde_json::json;
-use serde::Serialize;
+use serde::Serialize; // 'Deserialize' removido
 use std::path::Path;
 use std::process::Stdio;
 use log::{error, info};
@@ -20,15 +20,40 @@ struct TranscriptionSegment {
     text: String,
 }
 
-#[post("/transcribe")]
-async fn transcribe_audio(mut payload: Multipart) -> Result<impl Responder, Error> {
-    // Buffer para armazenar o arquivo WAV na memória
-    let mut wav_buffer = Vec::new();
+// A struct QueryParams não é mais necessária para o parâmetro 'model' se ele vier do multipart.
+// #[derive(Deserialize)]
+// struct QueryParams {
+//     model: Option<String>, 
+// }
 
-    // Processa o payload multipart para extrair o arquivo WAV
+#[post("/transcribe")]
+async fn transcribe_audio(
+    mut payload: Multipart,
+    // Removido: query: web::Query<QueryParams>, // O parâmetro 'model' virá do payload multipart
+) -> Result<impl Responder, Error> {
+    let mut wav_buffer = Vec::new();
+    let mut model_filename: Option<String> = None; // Variável para armazenar o nome do modelo
+
+    // Processa o payload multipart para extrair o arquivo WAV e o nome do modelo
     while let Some(mut field) = payload.try_next().await? {
-        while let Some(chunk) = field.try_next().await? {
-            wav_buffer.extend_from_slice(&chunk);
+        let field_name = field.name().to_string();
+        match field_name.as_str() {
+            "file" => {
+                while let Some(chunk) = field.try_next().await? {
+                    wav_buffer.extend_from_slice(&chunk);
+                }
+            },
+            "model" => {
+                // Se o campo for "model", leia seu conteúdo como texto
+                let mut model_data = Vec::new();
+                while let Some(chunk) = field.try_next().await? {
+                    model_data.extend_from_slice(&chunk);
+                }
+                model_filename = Some(String::from_utf8_lossy(&model_data).to_string());
+            },
+            _ => {
+                info!("Ignoring unknown multipart field: {}", field_name);
+            }
         }
     }
 
@@ -41,12 +66,15 @@ async fn transcribe_audio(mut payload: Multipart) -> Result<impl Responder, Erro
 
     info!("Received WAV file with size: {} bytes", wav_buffer.len());
 
-    // Define o caminho para o arquivo do modelo Whisper
-    let model_path = "./models/ggml-base.bin";
-    if !Path::new(model_path).exists() {
-        error!("Model file ggml-base.bin not found in ./models");
+    // Define o caminho para o arquivo do modelo Whisper.
+    // Se o parâmetro 'model' não for fornecido no multipart, usa 'ggml-base.bin' como padrão.
+    let final_model_filename = model_filename.unwrap_or_else(|| "ggml-base.bin".to_string());
+    let model_path = format!("./models/{}", final_model_filename);
+
+    if !Path::new(&model_path).exists() {
+        error!("Model file {} not found in ./models", final_model_filename);
         return Ok(HttpResponse::InternalServerError().json(json!({
-            "error": "Model file ggml-base.bin not found in ./models"
+            "error": format!("Model file {} not found in ./models", final_model_filename)
         })));
     }
 
@@ -86,7 +114,7 @@ async fn transcribe_audio(mut payload: Multipart) -> Result<impl Responder, Erro
     // Configura o comando para executar o binário whisper-cli
     let mut whisper_cmd = Command::new(&binary_path) // Usa o caminho hardcoded
         .args([
-            "-m", model_path,
+            "-m", &model_path, // Usar o caminho do modelo dinâmico
             "-f", "-",      // Lê o áudio da entrada padrão
             "-l", "pt",     // Define o idioma para português
             "-ovtt",        // Formato de saída WebVTT
@@ -244,11 +272,11 @@ async fn main() -> std::io::Result<()> {
     env_logger::init_from_env(Env::default().default_filter_or("info"));
     // Garante que o diretório 'models' exista para armazenar o modelo Whisper
     tokio::fs::create_dir_all("./models").await?;
-    info!("Starting server at http://0.0.0.0:8080"); // Alterado para 0.0.0.0 para compatibilidade com Docker
+    info!("Starting server at http://0.0.0.0:6000"); // Alterado para 0.0.0.0:6000
     HttpServer::new(|| {
         App::new().service(transcribe_audio)
     })
-    .bind(("0.0.0.0", 8080))? // Ouve em todas as interfaces de rede para ser acessível de fora do contêiner
+    .bind(("0.0.0.0", 6000))? // Ouve em todas as interfaces de rede na porta 6000
     .run()
     .await
 }

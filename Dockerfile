@@ -14,6 +14,6 @@ COPY target/release/rust_api_audio_to_text ./rust_api_audio_to_text
 
 RUN chmod +x ./rust_api_audio_to_text
 
-EXPOSE 8080
+EXPOSE 6000
 
 CMD ["./rust_api_audio_to_text"]
