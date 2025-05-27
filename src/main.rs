@@ -1,40 +1,49 @@
 use actix_multipart::Multipart;
-use actix_web::{post, App, HttpResponse, HttpServer, Responder, Error}; // 'web' removido
+use actix_web::{post, App, HttpResponse, HttpServer, Responder, Error};
 use futures_util::TryStreamExt as _;
 use tokio::process::Command;
 use tokio::io::AsyncWriteExt;
 use serde_json::json;
-use serde::Serialize; // 'Deserialize' removido
+use serde::Serialize;
 use std::path::Path;
 use std::process::Stdio;
-use log::{error, info};
+use log::{error, info, LevelFilter};
 use env_logger::Env;
 use hound::WavReader;
 use std::os::unix::fs::PermissionsExt;
 
-// Define uma struct para representar cada segmento de transcrição
 #[derive(Serialize)]
 struct TranscriptionSegment {
-    start: String, // Tempo de início do segmento
-    end: String,   // Tempo de fim do segmento
+    start: String,
+    end: String,
     text: String,
 }
 
-// A struct QueryParams não é mais necessária para o parâmetro 'model' se ele vier do multipart.
-// #[derive(Deserialize)]
-// struct QueryParams {
-//     model: Option<String>, 
-// }
+fn format_bytes(bytes: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = 1024 * KB;
+    const GB: usize = 1024 * MB;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} bytes", bytes)
+    }
+}
 
 #[post("/transcribe")]
 async fn transcribe_audio(
     mut payload: Multipart,
-    // Removido: query: web::Query<QueryParams>, // O parâmetro 'model' virá do payload multipart
 ) -> Result<impl Responder, Error> {
-    let mut wav_buffer = Vec::new();
-    let mut model_filename: Option<String> = None; // Variável para armazenar o nome do modelo
+    info!("Iniciando processamento da requisição de transcrição.");
 
-    // Processa o payload multipart para extrair o arquivo WAV e o nome do modelo
+    let mut wav_buffer = Vec::new();
+    let mut model_filename: Option<String> = None;
+
     while let Some(mut field) = payload.try_next().await? {
         let field_name = field.name().to_string();
         match field_name.as_str() {
@@ -44,7 +53,6 @@ async fn transcribe_audio(
                 }
             },
             "model" => {
-                // Se o campo for "model", leia seu conteúdo como texto
                 let mut model_data = Vec::new();
                 while let Some(chunk) = field.try_next().await? {
                     model_data.extend_from_slice(&chunk);
@@ -52,7 +60,6 @@ async fn transcribe_audio(
                 model_filename = Some(String::from_utf8_lossy(&model_data).to_string());
             },
             _ => {
-                info!("Ignoring unknown multipart field: {}", field_name);
             }
         }
     }
@@ -64,22 +71,18 @@ async fn transcribe_audio(
         })));
     }
 
-    info!("Received WAV file with size: {} bytes", wav_buffer.len());
+    info!("Arquivo WAV recebido com tamanho: {}", format_bytes(wav_buffer.len()));
 
-    // Define o caminho para o arquivo do modelo Whisper.
-    // Se o parâmetro 'model' não for fornecido no multipart, usa 'ggml-base.bin' como padrão.
     let final_model_filename = model_filename.unwrap_or_else(|| "ggml-base.bin".to_string());
     let model_path = format!("./models/{}", final_model_filename);
 
     if !Path::new(&model_path).exists() {
         error!("Model file {} not found in ./models", final_model_filename);
         return Ok(HttpResponse::InternalServerError().json(json!({
-            "error": format!("Model file {} not found in ./models", final_model_filename)
+            "error": format!("Model file {} not not found in ./models", final_model_filename)
         })));
     }
 
-    // Define o caminho para o binário whisper-cli
-    // É crucial que este caminho seja idêntico e acessível tanto na sua máquina quanto no ambiente Docker.
     let binary_path = "/app/build/bin/whisper-cli"; 
 
     if !Path::new(&binary_path).exists() {
@@ -88,7 +91,6 @@ async fn transcribe_audio(
             "error": format!("Whisper-cli binary not found at {}", binary_path)
         })));
     }
-    // Verifica se o binário é executável
     if !Path::new(&binary_path).metadata().map(|m| m.permissions().mode() & 0o100 != 0).unwrap_or(false) {
         error!("Whisper-cli binary at {} is not executable", binary_path);
         return Ok(HttpResponse::InternalServerError().json(json!({
@@ -96,7 +98,6 @@ async fn transcribe_audio(
         })));
     }
 
-    // Valida o formato do arquivo WAV usando a biblioteca hound
     let cursor = std::io::Cursor::new(&wav_buffer);
     let wav = WavReader::new(cursor).map_err(|e| {
         error!("Invalid WAV format: {}", e);
@@ -111,14 +112,13 @@ async fn transcribe_audio(
         })));
     }
 
-    // Configura o comando para executar o binário whisper-cli
-    let mut whisper_cmd = Command::new(&binary_path) // Usa o caminho hardcoded
+    let mut whisper_cmd = Command::new(&binary_path)
         .args([
-            "-m", &model_path, // Usar o caminho do modelo dinâmico
-            "-f", "-",      // Lê o áudio da entrada padrão
-            "-l", "pt",     // Define o idioma para português
-            "-ovtt",        // Formato de saída WebVTT
-            "-of", "-",     // Escreve a saída para a saída padrão
+            "-m", &model_path,
+            "-f", "-",
+            "-l", "pt",
+            "-ovtt",
+            "-of", "-",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -129,21 +129,17 @@ async fn transcribe_audio(
             actix_web::error::ErrorInternalServerError(format!("Failed to spawn whisper-cli command: {}", e))
         })?;
 
-    // Escreve o buffer WAV na entrada padrão do processo whisper-cli
     if let Some(mut stdin) = whisper_cmd.stdin.take() {
-        const CHUNK_SIZE: usize = 4096;
-        for chunk in wav_buffer.chunks(CHUNK_SIZE) {
-            match stdin.write_all(chunk).await {
-                Ok(_) => info!("Wrote {} bytes to stdin", chunk.len()),
-                Err(e) => {
-                    error!("Failed to write to stdin: {}", e);
-                    return Ok(HttpResponse::InternalServerError().json(json!({
-                        "error": format!("Failed to write to stdin: {}", e)
-                    })));
-                }
+        match stdin.write_all(&wav_buffer).await {
+            Ok(_) => {},
+            Err(e) => {
+                error!("Failed to write to stdin: {}", e);
+                return Ok(HttpResponse::InternalServerError().json(json!({
+                    "error": format!("Failed to write to stdin: {}", e)
+                })));
             }
         }
-        drop(stdin); // Importante: Fecha a entrada padrão para sinalizar EOF ao processo filho
+        drop(stdin);
     } else {
         error!("Failed to acquire stdin pipe for whisper-cli");
         return Ok(HttpResponse::InternalServerError().json(json!({
@@ -151,7 +147,6 @@ async fn transcribe_audio(
         })));
     }
 
-    // Aguarda a conclusão do processo whisper-cli e captura sua saída
     let output = whisper_cmd.wait_with_output().await
         .map_err(|e| {
             error!("Failed to wait for whisper-cli output: {}", e);
@@ -160,23 +155,17 @@ async fn transcribe_audio(
 
     let transcription_segments: Vec<TranscriptionSegment> = if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string(); 
-        info!("Transcription successful - stdout: '{}'", stdout);
-        info!("Transcription successful - stderr: '{}'", stderr);
 
-        // --- INÍCIO DA LÓGICA DE PARSE MAIS ROBUSTA PARA VTT ---
         let mut segments = Vec::new();
-        let mut current_time_line_raw = String::new(); // Armazena a linha de tempo bruta
+        let mut current_time_line_raw = String::new();
         let mut current_text_lines = Vec::new();
-        let mut in_segment_block = false; // Flag para indicar se estamos dentro de um bloco de cue VTT
+        let mut in_segment_block = false;
 
         for line in stdout.lines() {
             let trimmed_line = line.trim();
 
             if trimmed_line.is_empty() {
-                // Uma linha vazia geralmente significa o fim de um bloco de cue VTT
                 if in_segment_block && !current_time_line_raw.is_empty() && !current_text_lines.is_empty() {
-                    // Extrai start e end da current_time_line_raw
                     let cleaned_time_str = current_time_line_raw.trim_matches(|c| c == '[' || c == ']').to_string();
                     let time_parts: Vec<&str> = cleaned_time_str.split(" --> ").collect();
                     let start_time = time_parts.get(0).unwrap_or(&"").trim().to_string();
@@ -191,19 +180,15 @@ async fn transcribe_audio(
                     current_text_lines.clear();
                     in_segment_block = false;
                 }
-                continue; // Pula linhas vazias, elas agem como separadores
+                continue;
             }
 
-            // Verifica o cabeçalho "WEBVTT" e o pula
             if trimmed_line == "WEBVTT" {
                 continue;
             }
 
-            // Verifica se a linha contém "-->", indicando uma linha de timestamp
             if trimmed_line.contains("-->") {
-                // Se já estávamos processando um segmento, o adiciona antes de iniciar um novo
                 if in_segment_block && !current_time_line_raw.is_empty() && !current_text_lines.is_empty() {
-                    // Extrai start e end da current_time_line_raw
                     let cleaned_time_str = current_time_line_raw.trim_matches(|c| c == '[' || c == ']').to_string();
                     let time_parts: Vec<&str> = cleaned_time_str.split(" --> ").collect();
                     let start_time = time_parts.get(0).unwrap_or(&"").trim().to_string();
@@ -216,30 +201,25 @@ async fn transcribe_audio(
                     });
                 }
                 
-                // Tenta dividir a linha em parte de tempo e parte de texto
                 if let Some(bracket_index) = trimmed_line.find(']') {
-                    let time_part = &trimmed_line[..=bracket_index]; // Inclui o ']'
+                    let time_part = &trimmed_line[..=bracket_index];
                     let text_part_raw = &trimmed_line[bracket_index + 1..];
 
-                    current_time_line_raw = time_part.trim().to_string(); // Armazena a linha de tempo bruta
+                    current_time_line_raw = time_part.trim().to_string();
                     current_text_lines.clear();
-                    current_text_lines.push(text_part_raw.trim().to_string()); // Adiciona o texto desta linha
+                    current_text_lines.push(text_part_raw.trim().to_string());
                     in_segment_block = true;
                 } else {
-                    // Fallback se ']' não for encontrado (formato inesperado), trata a linha inteira como tempo
                     current_time_line_raw = trimmed_line.to_string();
                     current_text_lines.clear();
                     in_segment_block = true;
                 }
             } else if in_segment_block {
-                // Se estamos dentro de um bloco de segmento e não é um timestamp, é texto
                 current_text_lines.push(trimmed_line.to_string());
             }
         }
 
-        // Após o loop, adiciona o último segmento coletado, se houver
         if in_segment_block && !current_time_line_raw.is_empty() && !current_text_lines.is_empty() {
-            // Extrai start e end da current_time_line_raw
             let cleaned_time_str = current_time_line_raw.trim_matches(|c| c == '[' || c == ']').to_string();
             let time_parts: Vec<&str> = cleaned_time_str.split(" --> ").collect();
             let start_time = time_parts.get(0).unwrap_or(&"").trim().to_string();
@@ -252,7 +232,6 @@ async fn transcribe_audio(
             });
         }
         segments
-        // --- FIM DA LÓGICA DE PARSE MAIS ROBUSTA PARA VTT ---
     } else {
         let error = String::from_utf8_lossy(&output.stderr).to_string();
         error!("Transcription failed with stderr: {}", error);
@@ -261,22 +240,29 @@ async fn transcribe_audio(
         })));
     };
 
+    info!("Requisição de transcrição finalizada com sucesso.");
     Ok(HttpResponse::Ok().json(json!({
         "transcription_segments": transcription_segments
-    })))
-}
+    })))}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // Inicializa o logger para exibir mensagens de info e erro
-    env_logger::init_from_env(Env::default().default_filter_or("info"));
-    // Garante que o diretório 'models' exista para armazenar o modelo Whisper
+    env_logger::Builder::from_env(Env::default())
+        .filter_level(LevelFilter::Error)
+        .filter_module("rust_api_audio_to_text", LevelFilter::Info)
+        .init();
+    
     tokio::fs::create_dir_all("./models").await?;
-    info!("Starting server at http://0.0.0.0:6000"); // Alterado para 0.0.0.0:6000
+    
+    info!("Servidor Actix-web iniciando em http://0.0.0.0:6000"); 
+    
     HttpServer::new(|| {
         App::new().service(transcribe_audio)
     })
-    .bind(("0.0.0.0", 6000))? // Ouve em todas as interfaces de rede na porta 6000
+    .bind(("0.0.0.0", 6000))?
     .run()
-    .await
+    .await?;
+
+    info!("Servidor Actix-web encerrado.");
+    Ok(())
 }
