@@ -1,9 +1,0 @@
-services:
-  audio-to-text-app:
-    build: .
-    environment:
-      - NGROK_AUTHTOKEN=2xeMszyHxXCH047eKBm2Qx8VzTk_2WftU7Dmq1dECkqtVaXRz
-      - NGROK_URL=reindeer-evident-primarily.ngrok-free.app
-    ports:
-      - "6000:6000"
-    restart: unless-stopped
