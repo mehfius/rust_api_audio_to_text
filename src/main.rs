@@ -11,6 +11,7 @@ use log::{error, info, LevelFilter};
 use env_logger::Env;
 use hound::WavReader;
 use std::os::unix::fs::PermissionsExt;
+use actix_cors::Cors; // Import Cors
 
 #[derive(Serialize)]
 struct TranscriptionSegment {
@@ -243,7 +244,8 @@ async fn transcribe_audio(
     info!("Requisição de transcrição finalizada com sucesso.");
     Ok(HttpResponse::Ok().json(json!({
         "transcription_segments": transcription_segments
-    })))}
+    })))
+}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -257,7 +259,18 @@ async fn main() -> std::io::Result<()> {
     info!("Servidor Actix-web iniciando em http://0.0.0.0:6000"); 
     
     HttpServer::new(|| {
-        App::new().service(transcribe_audio)
+        let cors = Cors::default()
+            // Allow requests from localhost for development
+            .allowed_origin("http://localhost:8080") 
+            // Allow requests from your Vercel deployed frontend
+            .allowed_origin("https://cvto.vercel.app") 
+            .allowed_methods(vec!["POST"]) 
+            .allowed_headers(vec!["Content-Type", "Accept"]) 
+            .max_age(3600); 
+
+        App::new()
+            .wrap(cors) 
+            .service(transcribe_audio)
     })
     .bind(("0.0.0.0", 6000))?
     .run()
